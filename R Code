@@ -1,0 +1,790 @@
+# ------------------------------------------------------------------------------
+# LIBRARIES AND PATHS
+# ------------------------------------------------------------------------------
+library(readxl)
+library(stargazer)
+library(tidyr)
+library(corrplot)
+library(ggplot2)
+library(reshape2)
+library(plyr)
+library(dplyr)
+library(tidyverse)
+library(gridExtra)
+library(lmtest)
+library(gplots)
+library(zoo)
+library(plm)
+library(car)
+
+# Set paths
+dir        <- "~/Erasmus University Rotterdam/Gijs Tempelman - AS&P Group Assignment/Code & Data/Analysis" # change
+dirData    <- paste0(dir, "/Data/")
+dirResults <- paste0(dir, "/Results/")
+setwd(dir)
+# ------------------------------------------------------------------------------
+# DATA READING AND CLEANING (v.3)
+# ------------------------------------------------------------------------------
+# General crime dataset (no municipality detail - choose crimes to focus on)
+# ------------------------------------------------------------------------------
+# Load data
+dfCrime.General <- read.csv(file = paste0(dirData,"All_crimes_NL_2018-2021.csv"), 
+                    sep = ";", quote = "")
+# Delete and Rename columns
+dfCrime.General$RegioS <- NULL
+colnames(dfCrime.General) <- c("ID", "CrimeID", "Period", "Count")
+# Alter columns
+dfCrime.General$ID <- gsub("\"", "", dfCrime.General$ID)
+dfCrime.General$Count <- as.integer(gsub("\"", "", dfCrime.General$Count))
+dfCrime.General$Period <- as.integer(gsub("MM", "", dfCrime.General$Period))
+# Add column with year
+dfCrime.General$Year <- as.integer(substr(dfCrime.General$Period, 1, 4))
+# Remove period prior to July 2018
+dfCrime.General <- dfCrime.General[dfCrime.General$Period >= 201807,]
+# Turn NA values into 0
+dfCrime.General[is.na(dfCrime.General)] <- 0
+# ------------------------------------------------------------------------------
+# Crime Names
+# ------------------------------------------------------------------------------
+# Add data frame on crime names and join it to main dataframe
+dfCrime.Names   <- read_excel(paste0(dirData, "Crime_nr_and_name.xlsx"))
+dfCrime.General <- left_join(dfCrime.General, dfCrime.Names, 
+                             by = c("CrimeID" = "crime_nr"))
+# ------------------------------------------------------------------------------
+# Choosing crime types
+# ------------------------------------------------------------------------------
+# Get yearly trends
+dfCrime.General <- ddply(dfCrime.General, c("crime_name", "Year"), summarise,
+                        total = sum(Count))
+dfCrime.General <- dcast(dfCrime.General, crime_name ~ Year, value.var = "total")
+# 2019/2020 variation
+dfCrime.General$covid_var <- abs(
+  round(100*(dfCrime.General$`2020`/dfCrime.General$`2019` - 1),2))
+# Change infinites and NA
+dfCrime.General[sapply(dfCrime.General, is.infinite)] <- 0
+dfCrime.General[is.na(dfCrime.General)] <- 0
+# Order dataset
+dfCrime.General <- 
+  dfCrime.General[order(dfCrime.General$covid_var, decreasing = TRUE),]
+# ------------------------------------------------------------------------------
+# Specific Crime dataframe (downloaded with all municipalities for chosen crimes)
+# ------------------------------------------------------------------------------
+# Read main dataframe
+dfCrime <- read.csv(file = paste0(dirData,"Crime_data_municip_2012-2021.csv"), 
+                    sep = ";")
+# Rename columns
+colnames(dfCrime) <- c("ID", "CrimeID", "MunicipalCode", "Period", "Count")
+# Change period into YYYYMM
+dfCrime$Period <- as.integer(gsub("MM", "", dfCrime$Period))
+# Remove period prior to July 2018
+dfCrime <- dfCrime[dfCrime$Period >= 201807,]
+# Trim columns and change types
+dfCrime$Count        <- as.integer(dfCrime$Count)
+dfCrime$CrimeID      <- trimws(as.character(dfCrime$CrimeID))
+dfCrime$MunicipalCode <- trimws(as.character(dfCrime$MunicipalCode))
+# Join crime names
+dfCrime <- left_join(dfCrime, dfCrime.Names, by = c("CrimeID" = "crime_nr"))
+# ------------------------------------------------------------------------------
+# Long to wide
+# ------------------------------------------------------------------------------
+dfCrime <- dcast(dfCrime, Period + MunicipalCode ~ crime_name, value.var = "Count")
+# Change NA to 0
+dfCrime[is.na(dfCrime)] <- 0
+# ------------------------------------------------------------------------------
+# Group crime types
+# ------------------------------------------------------------------------------
+dfCrime$cTheft <- 
+  dfCrime$`Theft/burglary at home` +
+  dfCrime$`Theft/burglary from a box/garage/barn`+
+  dfCrime$`Theft from motor vehicles` +
+  dfCrime$`Theft from other vehicles` +
+  dfCrime$`Theft of mopeds, motorcycles, bicycles` +
+  dfCrime$Pickpocketing +
+  dfCrime$`Thefts (water)` +
+  dfCrime$`Theft/burglary, businesses, etc.` +
+  dfCrime$Shoplifting +
+  dfCrime$`Street robbery` +
+  dfCrime$Robbery
+# Get only crimes of interest
+dfCrime <- dfCrime[
+  c("Period","MunicipalCode",
+     "Total", "cTheft", "Cybercrime","Horizontal fraud", "Murder, manslaughter")]
+# ------------------------------------------------------------------------------
+# Municipalities
+# ------------------------------------------------------------------------------
+# Load municipality dataset
+dfMunicipality.Names  <- read_excel(paste0(dirData, 
+                                           "MunicipalCode_to_Name.xlsx"))
+# Join on main dataset
+dfCrime <- left_join(dfCrime, dfMunicipality.Names, 
+                     by = c("MunicipalCode" = "RegioS"))
+# Give column correct name
+names(dfCrime)[8] <- "Municipality" 
+# Remove municipality Code
+dfCrime$MunicipalCode <- NULL
+# Remove entries without municipality or in "foreign"
+dfCrime <- 
+  dfCrime[!(
+    dfCrime$Municipality == "Buitenland" | 
+      dfCrime$Municipality == "Niet-gemeentelijk ingedeeld"),]
+# ------------------------------------------------------------------------------
+# Provinces (needed for unemployment)
+# ------------------------------------------------------------------------------
+# Add dataframe on Provinces and link municipalities to Provinces
+dfProvince.Names <- read_excel(paste0(dirData, "Municipalities_Province.xlsx"))
+dfCrime <- left_join(dfCrime, dfProvince.Names, 
+                     by = c("Municipality" = "Gemeentenaam"))
+# NA's in Province linked to Friesland, add these
+dfCrime[, 8][is.na(dfCrime[, 8])] <- "Friesland"
+# Give column correct name
+names(dfCrime)[8] <- "Province" 
+# ------------------------------------------------------------------------------
+# Unemployment
+# ------------------------------------------------------------------------------
+# Load data set and change column name
+dfUnemploy <- read.csv(paste0(dirData, "Unemployment_province_quarter.csv"))
+names(dfUnemploy)[4] <- "rUnemploy"
+# Add column with year and quarter in main data set
+dfCrime$Year <- as.integer(substr(dfCrime$Period,1,4))
+dfCrime$Quarter <- ifelse(
+  as.numeric(substr(dfCrime$Period, 5,7)) <= 3,
+  1,
+  ifelse(
+    as.numeric(substr(dfCrime$Period, 5,7)) <= 6,
+    2,
+    ifelse(
+      as.numeric(substr(dfCrime$Period, 5,7)) <= 9,
+      3,
+      4)))
+# 202107 and 202108 turn to quarter 2 as no newer unemployment data was found
+dfCrime$Quarter[dfCrime$Period == 202107] <- 2
+dfCrime$Quarter[dfCrime$Period == 202108] <- 2
+# Join dataframes and remove unnecessary columns
+dfCrime <- left_join(dfCrime, dfUnemploy, 
+                     by = c("Year", "Quarter", "Province"))
+dfCrime$Year <- NULL
+dfCrime$Quarter <- NULL
+dfCrime$Province <- NULL
+# ------------------------------------------------------------------------------
+# Population data and crime rates
+# ------------------------------------------------------------------------------
+# Load population dataset
+dfPop <- read.csv(paste0(dirData, "Population_per_municipality_constant_v1.csv")
+                  , sep = ";")
+# Rename columns
+colnames(dfPop) <- c("Municipality", "Population")
+# Clean naming differences
+dfPop$Municipality <- 
+  replace(dfPop$Municipality, 
+          dfPop$Municipality == "Groningen (gemeente)", "Groningen")
+dfPop$Municipality <- 
+  replace(dfPop$Municipality, 
+          dfPop$Municipality == "Utrecht (gemeente)", "Utrecht")
+# Join on main dataset
+dfCrime <- left_join(dfCrime, dfPop, by = "Municipality")
+# Log population
+dfCrime$lnPop <- log(dfCrime$Population)
+# COmpute crime rates per crime type
+dfCrime$rTotal      <- round((dfCrime$Total                 
+                              /dfCrime$Population)*100000, 2)
+dfCrime$rTheft      <- round(dfCrime$cTheft                
+                             /dfCrime$Population*100000, 2)
+dfCrime$rHomicide   <- round(dfCrime$"Murder, manslaughter"
+                             /dfCrime$Population*100000, 2)
+dfCrime$rCybercrime <- round(dfCrime$Cybercrime            
+                             /dfCrime$Population*100000, 2)
+dfCrime$rHFraud     <- round(dfCrime$"Horizontal fraud"    
+                             /dfCrime$Population*100000, 2)
+# Remove unnecessary colunmns
+dfCrime$Total                  <- NULL
+dfCrime$cTheft                 <- NULL
+dfCrime$`Murder, manslaughter` <- NULL
+dfCrime$Cybercrime             <- NULL
+dfCrime$`Horizontal fraud`     <- NULL
+# ------------------------------------------------------------------------------
+# Stringency Index
+# ------------------------------------------------------------------------------
+# Load stringency dataset and remove unnecessary columns
+dfStringency <- read.csv(paste0(dirData,"Stringency_Index_NL.csv"), sep = ";")
+dfStringency <- dfStringency[, c(6:24)]
+# Turn NA values into 0
+dfStringency[is.na(dfStringency)] <- 0
+
+# Create sub-index dataset as a helper to aggregate indices
+# Get max value for each index of stringency dataset
+dfStringency.Sub <- data.frame(
+  cbind(
+    # Indices
+    c("C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "E1", "E2"),
+    # Max possible value (source: codebook)
+    c(3, 3, 2, 4, 2, 3, 2, 4, 2, 2),
+    # Has flag
+    c(1, 1, 1, 1, 1, 1, 1, 0, 1, 0)
+  )
+)
+# Change column names
+colnames(dfStringency.Sub) <- c("Indicator","N", "F")
+# Change types
+dfStringency.Sub$N <- as.integer(dfStringency.Sub$N)
+dfStringency.Sub$F <- as.integer(dfStringency.Sub$F)
+
+# Create sub index scores
+# 1. Create variable to help with correct column selection (no _Flag columns)
+cols <- dfStringency.Sub$Indicator
+flag_cols <- paste0(cols, "_Flag")
+remove <- c("C8_Flag", "E2_Flag")
+flag_cols <- flag_cols [ ! flag_cols %in% remove]
+# 2. Select all columns with index scores only
+tmp <- select(dfStringency, -Date, -all_of(flag_cols))
+# 3. Calculate subindex score using correct methodology as found on:
+# https://github.com/OxCGRT/covid-policy-tracker/
+#blob/master/documentation/index_methodology.md)
+dfStringency[paste0(cols, '_calculated')] <- Map(
+  function(w, x, y, z) 
+    100*((w - 0.5*(y - x))/z), 
+  tmp, dfStringency[flag_cols], 
+  dfStringency.Sub$"F", 
+  dfStringency.Sub$"N")
+# 3.1 Fix Faulty calculation at E2
+dfStringency$E2_calculated <- dfStringency$E2_calculated -25
+# 4. Remove negative values
+dfStringency[dfStringency < 0] <- 0                                               
+# 5. Create new dataframe with values per subindex
+dfStringency.Sub_calc <- dfStringency[, 20:29]
+# 6. Add date to new dataframe
+dfStringency.Sub_calc$Date <- dfStringency$Date
+# 6.1 Change order of columns
+dfStringency.Sub_calc <- dfStringency.Sub_calc[, c(11, 1:10)]
+# 6.2 Define Period
+dfStringency.Sub_calc$Period <- as.numeric(
+  substr(dfStringency.Sub_calc$Date, 1,6))
+dfStringency.Sub_calc$Date <- NULL
+# 7. Define mode function
+Mode <- function(x) {
+  ux <- unique(x)
+  ux[which.max(tabulate(match(x, ux)))]
+}
+# 7.1 Get the mode of all the column values per month
+dfStringency.Sub_calc <- dfStringency.Sub_calc %>%
+  group_by(Period) %>%
+  summarise_if(is.numeric, Mode) %>%
+  ungroup 
+dfStringency.Sub_calc <- round(dfStringency.Sub_calc, 2)
+# Join the dataframes
+dfCrime <- left_join(dfCrime, dfStringency.Sub_calc, by = "Period")
+dfCrime[is.na(dfCrime)] <- 0
+# ------------------------------------------------------------------------------
+# Create a balanced data set
+# ------------------------------------------------------------------------------
+# Remove rows with 0 values for population
+dfCrime <- dfCrime[dfCrime$Population != 0,]
+
+# Checking data for being a balanced panel: Values for all periods
+dfCrime.NumValid <-
+  ddply(dfCrime, .(Municipality), summarise,
+        numValid         = length(Municipality))
+stargazer(dfCrime.NumValid, type = "text")
+# ------------------------------------------------------------------------------
+# EXPLORATORY ANALYSIS (v.8)
+# ------------------------------------------------------------------------------
+# Variable analysis
+# ------------------------------------------------------------------------------
+# Summary statistics
+stargazer(dfCrime)
+# ------------------------------------------------------------------------------
+# Heterogeneity inspection
+# ------------------------------------------------------------------------------
+# Check for heterogeneity across municipalities
+
+# Initiate png instance
+png(height = 900, width = 1800, file = 
+      paste0(dirResults, "Heterogeneity_MunTotal.png"))
+par(mar=c(5,5,1,1)+.1) # margins
+# Plot
+plotmeans(rTotal~Municipality, data=dfCrime, ylab = "Total crime", 
+          cex.axis = 2, cex.lab = 2, xaxt = "n")
+# Finish png
+dev.off()
+
+# Initiate png instance
+png(height = 900, width = 1800, file = 
+      paste0(dirResults, "Heterogeneity_MunTheft.png"))
+par(mar=c(5,5,1,1)+.1) # margins
+# Plot
+plotmeans(rTheft~Municipality, data=dfCrime, ylab = "Theft", 
+          cex.axis = 2, cex.lab = 2, xaxt = "n")
+# Finish png
+dev.off()
+
+# Initiate png instance
+png(height = 900, width = 1800, file = 
+      paste0(dirResults, "Heterogeneity_MunHom.png"))
+par(mar=c(5,5,1,1)+.1) # margins
+# Plot
+plotmeans(rHomicide~Municipality, data=dfCrime, ylab = "Homicides", 
+          cex.axis = 2, cex.lab = 2, xaxt = "n")
+# Initiate png instance
+png(height = 900, width = 1800, file = 
+      paste0(dirResults, "Heterogeneity_MunCyber.png"))
+par(mar=c(5,5,1,1)+.1) # margins
+# Plot
+plotmeans(rCybercrime~Municipality, data=dfCrime, ylab = "Cybercrime", 
+          cex.axis = 2, cex.lab = 2, xaxt = "n")
+# Finish png
+dev.off()
+
+# Initiate png instance
+png(height = 900, width = 1800, file = 
+      paste0(dirResults, "Heterogeneity_MunFraud.png"))
+par(mar=c(5,5,1,1)+.1) # margins
+# Plot
+plotmeans(rHFraud~Municipality, data=dfCrime, ylab = "Horizontal fraud", 
+          cex.axis = 2, cex.lab = 2, xaxt = "n")
+# Finish png
+dev.off()
+# error bars are 95% confidence intervals
+# These graphs show that there are vast differences in crime rates between 
+# different municipalities in the Netherlands.
+# However, for some types of crime the differences are smaller.
+# E.g. for homicide, the numbers are low for all municipalities, leading to low  
+# absolute differences between municipalities, but high relative differences 
+# between municipalities.
+# ------------------------------------------------------------------------------
+# Correlation and Multicolinearity
+# ------------------------------------------------------------------------------
+# C1: School closing
+# C2: Workspace closing
+# C3: Cancel Public Events
+# C4: Restriction on gatherings
+# C5: Public transportation prohibition
+# C6: Stay at home order
+# C7: Restrictions on internal movement
+# C8: Internal Travel Controls
+# E1: Income Support
+# E2: Debt Relief for households
+
+# METHODOLOGY: compute VIF of the explanatory variables in the model. 
+# If there are values > 10, the 2 variables with the largest correlation will be 
+# aggregated. Iterate this process until all VIF are < 10. 
+
+# TEST 1 -----------------------------------------------------------------------
+# Define models
+mdlTotal01 <- rTotal ~ C1_calculated + C2_calculated + C3_calculated + 
+  C4_calculated + C5_calculated + C6_calculated + C7_calculated + C8_calculated + 
+  E1_calculated + E2_calculated + rUnemploy + lnPop
+
+mdlTheft01 <- rTheft ~ C1_calculated + C2_calculated + C3_calculated + 
+  C4_calculated + C5_calculated + C6_calculated + C7_calculated + C8_calculated + 
+  E1_calculated + E2_calculated + rUnemploy + lnPop
+
+mdlHom01 <- rHomicide ~ C1_calculated + C2_calculated + C3_calculated + 
+  C4_calculated + C5_calculated + C6_calculated + C7_calculated + C8_calculated + 
+  E1_calculated + E2_calculated + rUnemploy + lnPop
+
+mdlCyber01 <- rCybercrime ~ C1_calculated + C2_calculated + C3_calculated + 
+  C4_calculated + C5_calculated + C6_calculated + C7_calculated + C8_calculated + 
+  E1_calculated + E2_calculated + rUnemploy + lnPop
+
+mdlFraud01 <- rHFraud ~ C1_calculated + C2_calculated + C3_calculated + 
+  C4_calculated + C5_calculated + C6_calculated + C7_calculated + C8_calculated + 
+  E1_calculated + E2_calculated + rUnemploy + lnPop
+
+# VIF test
+vif01 <- data.frame(cbind(
+  vif(plm(mdlTotal01, data = dfCrime, model="pooling")),
+  vif(plm(mdlTheft01, data = dfCrime, model="pooling")),
+  vif(plm(mdlHom01, data = dfCrime, model="pooling")),
+  vif(plm(mdlCyber01, data = dfCrime, model="pooling")),
+  vif(plm(mdlFraud01, data = dfCrime, model="pooling"))))
+colnames(vif01) <- c("mdlTotal", "mdlTheft", "mdfHom", "mdlCyber", "mdlFraud")
+
+# Correlation matrix for indices
+corr_matrix1 <- cor(dfCrime[11:20])
+# Initiate png instance
+png(height = 1800, width = 1800, file = paste0(dirResults, "CorrMatrix_01.png"))
+# Plot correlation
+corrplot(corr_matrix1, 
+         method = "color", type = "upper", 
+         addCoef.col = "black", # Add coefficient of correlation
+         tl.cex = 3, tl.col="black", tl.srt=45, # Label size, color, and rotation
+         number.cex = 2.5, cl.pos = "n", # Number size and remove legend
+         # hide correlation coefficient on the principal diagonal
+         diag=FALSE)
+# Finish png
+dev.off()
+
+# C2 and C8 have the strongest correlation. 
+# Aggregate variables
+dfCrime$C28_calculated <- (dfCrime$C2_calculated + dfCrime$C8_calculated) / 2
+
+# TEST 2 -----------------------------------------------------------------------
+# Define models
+mdlTotal02 <- update(mdlTotal01, .~. - C2_calculated - C8_calculated +
+                       C28_calculated)
+mdlTheft02 <- update(mdlTheft01, .~. - C2_calculated - C8_calculated +
+                       C28_calculated)
+mdlHom02   <- update(mdlHom01, .~. - C2_calculated - C8_calculated +
+                       C28_calculated)
+mdlCyber02 <- update(mdlCyber01, .~. - C2_calculated - C8_calculated +
+                       C28_calculated)
+mdlFraud02 <- update(mdlFraud01, .~. - C2_calculated - C8_calculated +
+                       C28_calculated)
+
+# VIF test
+vif02 <- data.frame(cbind(
+  vif(plm(mdlTotal02, data = dfCrime, model="pooling")),
+  vif(plm(mdlTheft02, data = dfCrime, model="pooling")),
+  vif(plm(mdlHom02, data = dfCrime, model="pooling")),
+  vif(plm(mdlCyber02, data = dfCrime, model="pooling")),
+  vif(plm(mdlFraud02, data = dfCrime, model="pooling"))))
+colnames(vif02) <- c("mdlTotal", "mdlTheft", "mdfHom", "mdlCyber", "mdlFraud")
+
+# Correlation matrix for indices
+corr_matrix2 <- cor(dfCrime[c(11, 13, 14, 15, 16, 17, 19, 20, 21)])
+# Initiate png instance
+png(height = 1800, width = 1800, file = paste0(dirResults, "CorrMatrix_02.png"))
+# Plot correlation
+corrplot(corr_matrix2, 
+         method = "color", type = "upper", 
+         addCoef.col = "black", # Add coefficient of correlation
+         tl.cex = 3, tl.col="black", tl.srt=45, # Label size, color, and rotation
+         number.cex = 2.5, cl.pos = "n", # Number size and remove legend
+         # hide correlation coefficient on the principal diagonal
+         diag=FALSE)
+# Finish png
+dev.off()
+
+# C3 and C4 have the strongest correlation. 
+# Aggregate variables
+dfCrime$C34_calculated <- (dfCrime$C3_calculated + dfCrime$C4_calculated) / 2
+
+# TEST 3 -----------------------------------------------------------------------
+# Define models
+mdlTotal03 <- update(mdlTotal02, .~. - C3_calculated - C4_calculated +
+                       C34_calculated)
+mdlTheft03 <- update(mdlTheft02, .~. - C3_calculated - C4_calculated +
+                       C34_calculated)
+mdlHom03   <- update(mdlHom02, .~. - C3_calculated - C4_calculated +
+                       C34_calculated)
+mdlCyber03 <- update(mdlCyber02, .~. - C3_calculated - C4_calculated +
+                       C34_calculated)
+mdlFraud03 <- update(mdlFraud02, .~. - C3_calculated - C4_calculated +
+                       C34_calculated)
+
+# VIF test
+vif03 <- data.frame(cbind(
+  vif(plm(mdlTotal03, data = dfCrime, model="pooling")),
+  vif(plm(mdlTheft03, data = dfCrime, model="pooling")),
+  vif(plm(mdlHom03, data = dfCrime, model="pooling")),
+  vif(plm(mdlCyber03, data = dfCrime, model="pooling")),
+  vif(plm(mdlFraud03, data = dfCrime, model="pooling"))))
+colnames(vif03) <- c("mdlTotal", "mdlTheft", "mdfHom", "mdlCyber", "mdlFraud")
+
+# Correlation matrix for indices
+corr_matrix3 <- cor(dfCrime[c(11, 15, 16, 17, 19, 20, 21, 22)])
+# Initiate png instance
+png(height = 1800, width = 1800, file = paste0(dirResults, "CorrMatrix_03.png"))
+# Plot correlation
+corrplot(corr_matrix3, 
+         method = "color", type = "upper", 
+         addCoef.col = "black", # Add coefficient of correlation
+         tl.cex = 3, tl.col="black", tl.srt=45, # Label size, color, and rotation
+         number.cex = 2.5, cl.pos = "n", # Number size and remove legend
+         # hide correlation coefficient on the principal diagonal
+         diag=FALSE)
+# Finish png
+dev.off()
+
+# C7 and C34 have the strongest correlation. 
+# Aggregate variables
+dfCrime$C347_calculated <- (dfCrime$C3_calculated + dfCrime$C4_calculated +
+                              dfCrime$C7_calculated) / 3
+
+# TEST 4 -----------------------------------------------------------------------
+# Define models
+mdlTotal04 <- update(mdlTotal03, .~. - C7_calculated - C34_calculated +
+                       C347_calculated)
+mdlTheft04 <- update(mdlTheft03, .~. - C7_calculated - C34_calculated +
+                       C347_calculated)
+mdlHom04   <- update(mdlHom03, .~. - C7_calculated - C34_calculated +
+                       C347_calculated)
+mdlCyber04 <- update(mdlCyber03, .~. - C7_calculated - C34_calculated +
+                       C347_calculated)
+mdlFraud04 <- update(mdlFraud03, .~. - C7_calculated - C34_calculated +
+                       C347_calculated)
+
+# VIF test
+vif04 <- data.frame(cbind(
+  vif(plm(mdlTotal04, data = dfCrime, model="pooling")),
+  vif(plm(mdlTheft04, data = dfCrime, model="pooling")),
+  vif(plm(mdlHom04  , data = dfCrime, model="pooling")),
+  vif(plm(mdlCyber04, data = dfCrime, model="pooling")),
+  vif(plm(mdlFraud04, data = dfCrime, model="pooling"))))
+colnames(vif04) <- c("mdlTotal", "mdlTheft", "mdfHom", "mdlCyber", "mdlFraud")
+
+# Correlation matrix for indices
+corr_matrix4 <- cor(dfCrime[c(11, 15, 16, 19, 20, 21, 23)])
+# Initiate png instance
+png(height = 1800, width = 1800, file = paste0(dirResults, "CorrMatrix_04.png"))
+# Plot correlation
+corrplot(corr_matrix4, 
+         method = "color", type = "upper", 
+         addCoef.col = "black", # Add coefficient of correlation
+         tl.cex = 3, tl.col="black", tl.srt=45, # Label size, color, and rotation
+         number.cex = 2.5, cl.pos = "n", # Number size and remove legend
+         # hide correlation coefficient on the principal diagonal
+         diag=FALSE)
+# Finish png
+dev.off()
+
+# C28 and C347 have the strongest correlation. 
+# E1 and E2 too
+# Aggregate variables
+dfCrime$C23478_calculated <- (dfCrime$C2_calculated + dfCrime$C3_calculated +
+                              dfCrime$C4_calculated + dfCrime$C7_calculated +
+                                dfCrime$C8_calculated) / 5
+dfCrime$E12_calculated <- (dfCrime$E1_calculated + dfCrime$E2_calculated)/2
+
+# TEST 5 -----------------------------------------------------------------------
+# Define models
+mdlTotal05 <- update(mdlTotal04, .~. - C28_calculated - C347_calculated -
+                       E1_calculated - E2_calculated +
+                       E12_calculated + C23478_calculated)
+mdlTheft05 <- update(mdlTheft04, .~. - C28_calculated - C347_calculated -
+                       E1_calculated - E2_calculated +
+                       E12_calculated + C23478_calculated)
+mdlHom05   <- update(mdlHom04, .~. - C28_calculated - C347_calculated -
+                       E1_calculated - E2_calculated +
+                       E12_calculated + C23478_calculated)
+mdlCyber05 <- update(mdlCyber04, .~. - C28_calculated - C347_calculated -
+                       E1_calculated - E2_calculated +
+                       E12_calculated + C23478_calculated)
+mdlFraud05 <- update(mdlFraud04, .~. - C28_calculated - C347_calculated -
+                       E1_calculated - E2_calculated +
+                       E12_calculated + C23478_calculated)
+
+# VIF test
+vif05 <- data.frame(cbind(
+  vif(plm(mdlTotal05, data = dfCrime, model="pooling")),
+  vif(plm(mdlTheft05, data = dfCrime, model="pooling")),
+  vif(plm(mdlHom05  , data = dfCrime, model="pooling")),
+  vif(plm(mdlCyber05, data = dfCrime, model="pooling")),
+  vif(plm(mdlFraud05, data = dfCrime, model="pooling"))))
+colnames(vif05) <- c("mdlTotal", "mdlTheft", "mdfHom", "mdlCyber", "mdlFraud")
+
+# Correlation matrix for indices
+corr_matrix5 <- cor(dfCrime[c(11, 15, 16, 24, 25)])
+# Initiate png instance
+png(height = 1800, width = 1800, file = paste0(dirResults, "CorrMatrix_05.png"))
+# Plot correlation
+corrplot(corr_matrix5, 
+         method = "color", type = "upper", 
+         addCoef.col = "black", # Add coefficient of correlation
+         tl.cex = 3, tl.col="black", tl.srt=45, # Label size, color, and rotation
+         number.cex = 2.5, cl.pos = "n", # Number size and remove legend
+         # hide correlation coefficient on the principal diagonal
+         diag=FALSE)
+# Finish png
+dev.off()
+
+vif01 <- rownames_to_column(vif01)
+vif02 <- rownames_to_column(vif02)
+vif03 <- rownames_to_column(vif03)
+vif04 <- rownames_to_column(vif04)
+vif05 <- rownames_to_column(vif05)
+
+# Summary of tests
+VIF <- merge(
+  merge(
+    merge(vif01[1:2], vif02[1:2], by = "rowname", all = TRUE),
+    merge(vif03[1:2], vif04[1:2], by = "rowname", all = TRUE),
+    by = "rowname", all = TRUE),
+  vif05[1:2],
+  by = "rowname", all = TRUE)
+colnames(VIF) <- c("Variable", "VIF 01", "VIF 02", "VIF 03", "VIF 04", "VIF 05")
+rownames(VIF) <- VIF[,1]
+stargazer(VIF[,-1], summary = FALSE)
+# ------------------------------------------------------------------------------
+# REGRESSION ANALYSIS (v.7)
+# ------------------------------------------------------------------------------
+# Define final models
+mdlTotal <- mdlTotal05
+mdlTheft <- mdlTheft05 
+mdlHom   <- mdlHom05
+mdlCyber <- mdlCyber05 
+mdlFraud <- mdlFraud05 
+# ------------------------------------------------------------------------------
+# Pooled Regression
+# ------------------------------------------------------------------------------
+PoolTotal <- plm(mdlTotal, data = dfCrime, model = "pooling")
+PoolTheft <- plm(mdlTheft, data = dfCrime, model = "pooling")
+PoolHom   <- plm(mdlHom,   data = dfCrime, model = "pooling")
+PoolCyber <- plm(mdlCyber, data = dfCrime, model = "pooling")
+PoolFraud <- plm(mdlFraud, data = dfCrime, model = "pooling")
+# ------------------------------------------------------------------------------
+# Between Regression
+# ------------------------------------------------------------------------------
+BtwTotal <- plm(mdlTotal, data = dfCrime, index = "Municipality", model = "between")
+BtwTheft <- plm(mdlTheft, data = dfCrime, index = "Municipality", model = "between")
+BtwHom   <- plm(mdlHom,   data = dfCrime, index = "Municipality", model = "between")
+BtwCyber <- plm(mdlCyber, data = dfCrime, index = "Municipality", model = "between")
+BtwFraud <- plm(mdlFraud, data = dfCrime, index = "Municipality", model = "between")
+# ------------------------------------------------------------------------------
+# Fixed Effects Regression
+# ------------------------------------------------------------------------------
+FETotal <- plm(mdlTotal, data = dfCrime, index = c("Municipality", "Period"), 
+               model = "within")
+FETheft <- plm(mdlTheft, data = dfCrime, index = c("Municipality", "Period"), 
+               model = "within")
+FEHom   <- plm(mdlHom,   data = dfCrime, index = c("Municipality", "Period"), 
+               model = "within")
+FECyber <- plm(mdlCyber, data = dfCrime, index = c("Municipality", "Period"), 
+               model = "within")
+FEFraud <- plm(mdlFraud, data = dfCrime, index = c("Municipality", "Period"), 
+               model = "within")
+# ------------------------------------------------------------------------------
+# Random Effects Regression
+# ------------------------------------------------------------------------------
+RETotal <- plm(mdlTotal, data = dfCrime, index = c("Municipality", "Period"), 
+               model = "random")
+RETheft <- plm(mdlTheft, data = dfCrime, index = c("Municipality", "Period"), 
+               model = "random")
+REHom   <- plm(mdlHom,   data = dfCrime, index = c("Municipality", "Period"), 
+               model = "random")
+RECyber <- plm(mdlCyber, data = dfCrime, index = c("Municipality", "Period"), 
+               model = "random")
+REFraud <- plm(mdlFraud, data = dfCrime, index = c("Municipality", "Period"), 
+               model = "random")
+# ------------------------------------------------------------------------------
+# Diagnostics 
+# ------------------------------------------------------------------------------
+diag_models <- data.frame(round(cbind(
+# Hausman test to decide between fixed or random effects
+# Null hypothesis: preferred model is random effects
+# Alternative hypothesis: preferred model is fixed effects
+# If p < 0.05 use fixed effects
+  rbind(
+    phtest(FETotal, RETotal)$p.value, # RE
+    phtest(FETheft, RETheft)$p.value, # RE
+    phtest(FEHom, REHom)$p.value,     # RE
+    phtest(FECyber, RECyber)$p.value, # FE
+    phtest(FEFraud, REFraud)$p.value # RE
+  ),
+
+# Test for time-fixed effects - Lagrange multiplier test
+# Null hypothesis is that no time-fixed effects are needed
+# If p < 0.05 use time-fixed effects
+  rbind(
+    as.numeric(plmtest(FETotal, c("time"), type = ("bp"))[2]), # Use
+    as.numeric(plmtest(FETheft, c("time"), type = ("bp"))[2]), # Use
+    as.numeric(plmtest(FEHom,   c("time"), type = ("bp"))[2]), # Don't Use
+    as.numeric(plmtest(FECyber, c("time"), type = ("bp"))[2]), # Use
+    as.numeric(plmtest(FEFraud, c("time"), type = ("bp"))[2]) # Use
+  ),
+
+# Test for random effects regression vs pooled OLS regression
+# Null is no panel effect (i.e. pooled OLS is better)
+# if p < 0.05 random effects is appropriate
+  rbind(
+    as.numeric(plmtest(PoolTotal, type = "bp")[2]), # RE
+    as.numeric(plmtest(PoolTheft, type = "bp")[2]), # RE
+    as.numeric(plmtest(PoolHom,   type = "bp")[2]), # Pooled
+    as.numeric(plmtest(PoolCyber, type = "bp")[2]), # RE
+    as.numeric(plmtest(PoolFraud, type = "bp")[2]) # RE
+  )),2), 
+row.names = c("mdlTotal", "mdlTheft", "mdlHom", "mdlCyber", "mdlFraud"))
+colnames(diag_models) <- c("Haussman", "Time FE", "PLM")
+
+stargazer(diag_models, summary = FALSE)
+
+# Cross-sectional dependence testing not performed 
+# because this is usually not a problem if the panel includes 
+# only a few years and a relatively large number of cases
+
+# Testing for Heteroscedasticity 
+# If p<0.05 it's Heteroskedastic
+diag_Hetero <- data.frame(round(cbind(
+  rbind(
+    as.numeric(lmtest ::bptest(PoolTotal)[4]), # Hetero
+    as.numeric(lmtest ::bptest(PoolTheft)[4]), # Hetero
+    as.numeric(lmtest ::bptest(PoolHom)[4]),   # Hetero
+    as.numeric(lmtest ::bptest(PoolCyber)[4]), # Hetero
+    as.numeric(lmtest ::bptest(PoolFraud)[4])  # Hetero
+  ),
+  rbind(
+    as.numeric(lmtest ::bptest(FETotal)[4]),   # Hetero
+    as.numeric(lmtest ::bptest(FETheft)[4]),   # Hetero
+    as.numeric(lmtest ::bptest(FEHom)[4]),     # Hetero
+    as.numeric(lmtest ::bptest(FECyber)[4]),   # Hetero
+    as.numeric(lmtest ::bptest(FEFraud)[4])    # Hetero
+  ),
+  rbind(
+    as.numeric(lmtest ::bptest(RETotal)[4]),   # Hetero
+    as.numeric(lmtest ::bptest(RETheft)[4]),   # Hetero
+    as.numeric(lmtest ::bptest(REHom)[4]),     # Hetero
+    as.numeric(lmtest ::bptest(RECyber)[4]),   # Hetero
+    as.numeric(lmtest ::bptest(REFraud)[4])    # Hetero
+  )),2),
+  row.names = c("mdlTotal", "mdlTheft", "mdlHom", "mdlCyber", "mdlFraud"))
+colnames(diag_Hetero) <- c("Pooled", "FE", "RE")
+stargazer(diag_Hetero)
+
+# Calculating Whites robust SE for pooled models
+RBSE.PoolTotal <- sqrt(diag(vcovHC(PoolTotal, type = 'HC0')))
+RBSE.PoolTheft <- sqrt(diag(vcovHC(PoolTheft, type = 'HC0')))
+RBSE.PoolHom <- sqrt(diag(vcovHC(PoolHom, type = 'HC0')))
+RBSE.PoolCyber <- sqrt(diag(vcovHC(PoolCyber, type = 'HC0')))
+RBSE.PoolFraud <- sqrt(diag(vcovHC(PoolFraud, type = 'HC0')))
+
+# Calculating Whites robust SE for FE models
+RBSE.FETotal <- sqrt(diag(vcovHC(FETotal, type = 'HC0')))
+RBSE.FETheft <- sqrt(diag(vcovHC(FETheft, type = 'HC0')))
+RBSE.FEHom <- sqrt(diag(vcovHC(FEHom, type = 'HC0')))
+RBSE.FECyber <- sqrt(diag(vcovHC(FECyber, type = 'HC0')))
+RBSE.FEFraud <- sqrt(diag(vcovHC(FEFraud, type = 'HC0')))
+
+# Calculating Whites robust SE for RE models
+RBSE.RETotal <- sqrt(diag(vcovHC(RETotal, type = 'HC0')))
+RBSE.RETheft <- sqrt(diag(vcovHC(RETheft, type = 'HC0')))
+RBSE.REHom <- sqrt(diag(vcovHC(REHom, type = 'HC0')))
+RBSE.RECyber <- sqrt(diag(vcovHC(RECyber, type = 'HC0')))
+RBSE.REFraud <- sqrt(diag(vcovHC(REFraud, type = 'HC0')))
+
+# ------------------------------------------------------------------------------
+# Summary
+# ------------------------------------------------------------------------------
+# Total Model (RE preferred)
+stargazer(PoolTotal, BtwTotal, FETotal, RETotal,
+          no.space = TRUE, align = TRUE, intercept.bottom = FALSE,
+          column.labels = c("Pool", "Between", "FERob", "RERob"), 
+          se=list(RBSE.PoolTotal, NULL, RBSE.FETotal, RBSE.RETotal))
+
+# Theft (RE preferred)
+stargazer(PoolTheft, BtwTheft, FETheft, RETheft,
+          no.space = TRUE, align = TRUE, intercept.bottom = FALSE,
+          column.labels = c("Pool", "Between", "FE", "RE"), 
+          se=list(RBSE.PoolTheft, NULL, RBSE.FETheft, RBSE.RETheft))
+
+# Homicides (Pool preferred)
+stargazer(PoolHom, BtwHom, FEHom, REHom,
+          no.space = TRUE, align = TRUE, intercept.bottom = FALSE,
+          column.labels = c("Pool", "Between", "FE", "RE"), 
+          se=list(RBSE.PoolHom, NULL, RBSE.FEHom, RBSE.REHom))
+
+# Cybercrime (FE preferred)
+stargazer(PoolCyber, BtwCyber, FECyber, RECyber,
+          no.space = TRUE, align = TRUE, intercept.bottom = FALSE,
+          column.labels = c("Pool", "Between", "FE", "RE"), 
+          se=list(RBSE.PoolCyber, NULL, RBSE.FECyber, RBSE.RECyber))
+
+# Horizontal fraud (RE preferred)
+stargazer(PoolFraud, BtwFraud, FEFraud, REFraud,
+          no.space = TRUE, align = TRUE, intercept.bottom = FALSE,
+          column.labels = c("Pool", "Between", "FE", "RE"), 
+          se=list(RBSE.PoolFraud, NULL, RBSE.FEFraud, RBSE.REFraud))
+
+# Final models
+stargazer(RETotal, RETheft, PoolHom, FECyber, REFraud,
+          no.space = TRUE, align = TRUE, intercept.bottom = FALSE,
+          se = list(RBSE.RETotal, RBSE.RETheft, 
+                    RBSE.PoolHom, RBSE.FECyber, RBSE.REFraud))
