@@ -671,17 +671,6 @@ diag_models <- data.frame(round(cbind(
     phtest(FEFraud, REFraud)$p.value # RE
   ),
 
-# Test for time-fixed effects - Lagrange multiplier test
-# Null hypothesis is that no time-fixed effects are needed
-# If p < 0.05 use time-fixed effects
-  rbind(
-    as.numeric(plmtest(FETotal, c("time"), type = ("bp"))[2]), # Use
-    as.numeric(plmtest(FETheft, c("time"), type = ("bp"))[2]), # Use
-    as.numeric(plmtest(FEHom,   c("time"), type = ("bp"))[2]), # Don't Use
-    as.numeric(plmtest(FECyber, c("time"), type = ("bp"))[2]), # Use
-    as.numeric(plmtest(FEFraud, c("time"), type = ("bp"))[2]) # Use
-  ),
-
 # Test for random effects regression vs pooled OLS regression
 # Null is no panel effect (i.e. pooled OLS is better)
 # if p < 0.05 random effects is appropriate
