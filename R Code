@@ -716,7 +716,7 @@ diag_Hetero <- data.frame(round(cbind(
   )),2),
   row.names = c("mdlTotal", "mdlTheft", "mdlHom", "mdlCyber", "mdlFraud"))
 colnames(diag_Hetero) <- c("Pooled", "FE", "RE")
-stargazer(diag_Hetero)
+stargazer(diag_Hetero, summary = FALSE)
 
 # Calculating Whites robust SE for pooled models
 RBSE.PoolTotal <- sqrt(diag(vcovHC(PoolTotal, type = 'HC0')))
